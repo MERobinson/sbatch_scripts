@@ -4,15 +4,12 @@ set -o pipefail
 set -o nounset
 
 # default arg
-workdir=$PWD
-outdir=''
-check='yes'
+check="yes"
 
 # help message
 help_message="
+Wrapper to generate STAR index
 
-purpose:
-    Wrapper to run PBS script to generate STAR index
 usage:
     bash $(basename "$0") [-options] -G <GTF>
 required arguments:
@@ -73,10 +70,15 @@ while [[ $# -gt 1 ]]; do
     shift
 done
 
-# set logdir
-if [[ -z ${logdir:-} ]]; then
-    logdir=$outdir
+# set outdirs
+if [[ -z ${outdir:-} ]]; then
+    outdir="."
 fi
+mkdir -p $outdir
+if [[ -z ${logdir:-} ]]; then
+    logdir=${outdir}
+fi
+mkdir -p $logdir
 
 # check required arg
 if [[ -z ${gtf:-} ]]; then
@@ -89,11 +91,11 @@ fi
 
 # check files unless flagged
 if [[ $check = yes ]]; then
-    if [[ ! -r $workdir/$gtf ]]; then
-        printf "\nERROR: GTF file is not readable: %s/%s\n" $workdir $gtf
+    if [[ ! -r $gtf ]]; then
+        printf "\nERROR: GTF file is not readable: %s\n" $gtf
         echo "$help_message"; exit 1
-    elif [[ ! -r $workdir/$fasta ]]; then
-        printf "\nERROR: FASTA file is not readable: %s/%s\n" $workdir $fasta
+    elif [[ ! -r $fasta ]]; then
+        printf "\nERROR: FASTA file is not readable: %s\n" $fasta
         echo "$help_message"; exit 1
     fi
 fi
@@ -105,24 +107,18 @@ if [[ -z ${name:-} ]]; then
 fi
 
 # get basenames/prefixes
-fasta_prefix=${fasta%.*}
-fasta_base=$(basename $fasta)
-gtf_base=$(basename $gtf)
+fasta_prefix=${fasta%%.*}
 
 # check if gzipped
 if [[ ${fasta} == *".gz" ]]; then
-    gzcmd="gzip -d ${fasta_base}"
-    fasta_base=${fasta_base%.gz*}
+    gzcmd="gzip -d ${fasta}"
+    fasta=${fasta%.gz*}
 fi
-
-# create required dirs
-mkdir -p ${workdir}/${logdir}
-mkdir -p ${workdir}/${outdir}
 
 # set log file names
 scr_name=$(basename "$0" .sh)
-scr_log=$workdir/$logdir/$name.$scr_name.scr.log
-std_log=$workdir/$logdir/$name.$scr_name.std.log
+scr_log=$logdir/$name.$scr_name.scr
+std_log=$logdir/$name.$scr_name.log
 
 # gen job script
 script=$(cat <<- EOS 
@@ -130,17 +126,16 @@ script=$(cat <<- EOS
 		#SBATCH --time=24:00:00
 		#SBATCH -N 1
 		#SBATCH -n 20
-		#SBATCH --mem=20G
+		#SBATCH --mem=60G
 		#SBATCH --job-name=index
 		#SBATCH --output=$std_log
 
-		# load modules
-		module load STAR
-	
-		# copy files to scratch
-		cp -L $workdir/$fasta_prefix* .
-		cp -L $workdir/$gtf .
+		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 
+		# load modules
+		source ~/miniconda3/etc/profile.d/conda.sh
+		conda activate star
+	
 		# make outdir
 		mkdir -p $name
 
@@ -148,13 +143,10 @@ script=$(cat <<- EOS
 		STAR --runMode genomeGenerate \
 			--runThreadN 20 \
 			--genomeDir $name \
-			--genomeFastaFiles $fasta_base \
-			--sjdbGTFfile $gtf_base
-
-		# copy output to outdir
-		cp -r $name $workdir/$outdir
+			--genomeFastaFiles $fasta \
+			--sjdbGTFfile $gtf
 		
-		ls -lhAR
+		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 	EOS
 )
 echo "$script" > $scr_log

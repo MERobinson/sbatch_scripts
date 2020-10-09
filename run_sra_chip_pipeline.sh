@@ -3,7 +3,6 @@ set -o pipefail
 set -o nounset
 
 # default arg
-workdir=$PWD
 outdir=''
 bamdir='bam'
 logdir='logs'
@@ -116,21 +115,16 @@ fi
 if [[ -z ${fasta:-} ]]; then
     printf "\nERROR: --fasta argument required.\n"
     echo "$help_message"; exit 1
-elif [[ ! -r $workdir/$fasta ]]; then
-    printf "\nERROR: Input FASTA file cannot be read: %s/%s\n" $workdir $fasta
+elif [[ ! -r $fasta ]]; then
+    printf "\nERROR: Input FASTA file cannot be read: %s\n" $fasta
     echo "$help_message"; exit 1
-else
-    fasta_base=$(basename $fasta)
-    fasta_prefix=${fasta%.*}
 fi
 if [[ -z ${index:-} ]]; then
     printf "\nERROR: --index argument required.\n"
     echo "$help_message"; exit 1
-elif [[ ! -r "$workdir/$index.ann" ]]; then
-    printf "\nERROR: Input index files cannot be read: %s/%s\n" $workdir $index
+elif [[ ! -r "${index}.ann" ]]; then
+    printf "\nERROR: Input index files cannot be read: %s\n" $index
     echo "$help_message"; exit 1
-else
-    index_base=$(basename $index)
 fi
 
 # check sample names
@@ -147,13 +141,14 @@ if [[ -n ${genome:-} ]]; then
 fi
 
 # create required dirs
-mkdir -p $workdir/$logdir
-mkdir -p $workdir/$qcdir
-mkdir -p $workdir/$bamdir
-mkdir -p $workdir/$trackdir
+mkdir -p $logdir
+mkdir -p $qcdir
+mkdir -p $bamdir
+mkdir -p $trackdir
 
 # load sra toolkit
 module load SRA-Toolkit
+module load edirect
 
 # for each SRA number, submit PBS job
 for idx in ${!sra_array[@]}; do
@@ -174,19 +169,19 @@ for idx in ${!sra_array[@]}; do
     fi
 
 	# fetch SRA run info
-    if [[ ! -r $workdir/$logdir/$name.run_info.csv ]]; then
+    if [[ ! -r $logdir/$name.run_info.csv ]]; then
         $(esearch -db sra -query $sra | efetch -format runinfo \
-          > $workdir/$logdir/$name.run_info.csv)
+          > $logdir/$name.run_info.csv)
     fi
 
     # check n runs
-    n_runs=$(wc -l $workdir/$logdir/$name.run_info.csv | cut -f1 -d' ') 
+    n_runs=$(wc -l $logdir/$name.run_info.csv | cut -f1 -d' ') 
     if [[ $n_runs < 2 ]]; then
         echo "WARNING: no runs found for sample $sra"
         continue
     fi
 
-    if [[ ! -r $workdir/$bamdir/$comb_name.bam ]]; then
+    if [[ ! -r $bamdir/$comb_name.bam ]]; then
 
         # fetch and align per run
         while read line; do
@@ -208,7 +203,7 @@ for idx in ${!sra_array[@]}; do
             printf "\tLIBTYPE: %s\n" $libtype
 
             # get fastq
-            if [[ -r $workdir/$fqdir/${run_name}_1.fastq.gz ]]; then
+            if [[ -r $fqdir/${run_name}_1.fastq.gz ]]; then
                 printf "\tFASTQ already exists, skipping fetch\n"
             else
                 sra_call=("bash $scriptdir/fetch_fastq_sra.sh"
@@ -225,7 +220,7 @@ for idx in ${!sra_array[@]}; do
             fi
 
             # align
-            if [[ -r $workdir/$bamdir/${run_name}.bam ]]; then
+            if [[ -r $bamdir/${run_name}.bam ]]; then
                 printf "\tRun BAM file already exists, skipping alignment\n"
             else
                 bwa_call=("bash ${scriptdir}/align_fastq_bwa.sh"
@@ -245,7 +240,7 @@ for idx in ${!sra_array[@]}; do
             fi
             merge_arg="${merge_arg:-},$bamdir/${run_name}.bam"
 
-        done <<< "$(tail -n +2 $workdir/$logdir/$name.run_info.csv)"
+        done <<< "$(tail -n +2 $logdir/$name.run_info.csv)"
 
         # merge runs
         merge_arg=${merge_arg#*,}
@@ -269,7 +264,7 @@ for idx in ${!sra_array[@]}; do
     fi 
 
     # generate track
-    if [[ -r $workdir/$trackdir/$comb_name.bedGraph ]]; then
+    if [[ -r $trackdir/$comb_name.bedGraph ]]; then
         printf "\tTrack already exists, skipping pileup\n"
     else
         if [[ -n ${depend:-} ]]; then

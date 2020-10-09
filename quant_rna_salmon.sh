@@ -3,7 +3,6 @@ set -o pipefail
 set -o nounset 
 
 # default arg
-workdir=$PWD
 outdir=''
 check='on'
 libtype='A'
@@ -26,7 +25,6 @@ optional arguments:
     -o|--outdir : output directory name (default = PWD)
     --logdir : output directory for log files (default = --outdir)
     --check : whether to check input files [on,off] (default = on)
-    --depend : list of PBS dependencies (default = NULL)
 additional info:
     # if quasi mode --reads should be FASTQ files and --index salmon index
     # if align mode --reads should be aligned BAM and --index transcripts FASTA
@@ -55,7 +53,7 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         -o|--outdir)
-            outdir=$2
+            outdir="./$2"
             shift
             ;;
         -n|--name)
@@ -67,15 +65,11 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         --logdir)
-            logdir=$2
+            logdir="./$2"
             shift
             ;;
         --check)
             check=$2
-            shift
-            ;;
-        --depend)
-            depend="#PBS -W depend=$2"
             shift
             ;;
         *)
@@ -95,26 +89,20 @@ elif [[ -z ${index:-} ]]; then
     echo "$help_message"; exit 1
 fi
 
+# set/check output directories
+if [[ -z ${outdir:-} ]]; then
+    outdir="."
+fi
+mkdir -p $outdir
+if [[ -z ${logdir:-} ]]; then
+    logdir=${outdir}
+fi
+mkdir -p $logdir
+
 # split potential multi runs
 IFS=',' read -r -a r1_array <<< ${r1}
-if [[ ${#r1_array[@]} -gt 1 ]]; then
-    for r in ${r1_array[@]}; do
-        r1_bn="${r1_bn:-} $(basename ${r})"
-        r1_cp="${r1_cp:-} cp ${workdir}/${r}* .;"
-    done
-else
-    r1_bn=$(basename ${r1})
-    r1_cp="cp ${workdir}/${r1}* ."
-fi
 if [[ -n ${r2:-} ]]; then
     IFS=',' read -r -a r2_array <<< ${r2:-}
-    for r in ${r2_array[@]}; do
-        r2_bn="${r2_bn:-} $(basename ${r})"
-        r2_cp="${r2_cp:-} cp ${workdir}/${r}* .;"
-    done
-else
-    r2_bn=$(basename ${r2})
-    r2_cp="cp ${workdir}/${r2}* ."
 fi
 
 # set optional args
@@ -122,42 +110,37 @@ if [[ -z ${name:-} ]]; then
     name=$(basename "${r1}")
     name=${name%%.*}
 fi
-if [[ -z ${logdir:-} ]]; then
-    logdir=$outdir
-fi
 if [[ $mode = 'quasi' ]]; then
-    r1_arg="-r ${r1_bn}"
-	idx_arg="-i $(basename ${index})"
+    r1_arg="-r ${r1_array[@]}"
+	idx_arg="-i ${index}"
 elif [[ $mode = 'align' ]]; then
-    r1_arg="-a ${r1_bn}"
-	idx_arg="-t $(basename ${index})"
+    r1_arg="-a ${r1_array[@]}"
+	idx_arg="-t ${index}"
 else
     printf "\nERROR: --mode argument not recognised: %s\n" $mode 
     echo "$help_message"; exit 1
 fi
-if [[ -n ${r2:-} ]]; then
-    r1_arg="-1 ${r1_bn}"
-    r2_arg="-2 ${r2_bn}"
+if [[ -n ${r2_array:-} ]]; then
+    r1_arg="-1 ${r1_array[@]}"
+    r2_arg="-2 ${r2_array[@]}"
 fi
-mkdir -p $workdir/$outdir
-mkdir -p $workdir/$logdir
 
 # check files
 if [[ ${check} = 'on' ]]; then
     for r in ${r1_array[@]}; do  
-        if [[ ! -r ${workdir}/${r} ]]; then 
-            printf "\nERROR: input file cannot be read: %s/%s\n" $workdir $r
+        if [[ ! -r ${r} ]]; then 
+            printf "\nERROR: input file cannot be read: %s/%s\n" $r
             echo "$help_message"; exit 1
         fi
     done
-    if [[ ! -r "${workdir}/${index}" ]]; then
-        printf "\nERROR: index cannot be read: %s/%s\n" $workdir $index
+    if [[ ! -r ${index} ]]; then
+        printf "\nERROR: index cannot be read: %s/%s\n" $index
         echo "$help_message"; exit 1
     fi
     if [[ -n ${r2:-} ]]; then
         for r in ${r2_array[@]}; do
-            if [[ ! -r ${workdir}/${r} ]]; then 
-                printf "\nERROR: input file cannot be read: %s/%s\n" $workdir $r
+            if [[ ! -r ${r} ]]; then 
+                printf "\nERROR: input file cannot be read: %s/%s\n" $r
                 echo "$help_message"; exit 1
             fi
         done
@@ -166,52 +149,39 @@ fi
 
 # set commands
 salmon_cmd=("salmon quant ${idx_arg} -l ${libtype}" 
-            "${r1_arg} ${r2_arg:-} -o salmon_out/${name}"
+            "${r1_arg} ${r2_arg:-} -o ${outdir}/${name}"
             "--validateMappings -p 12")
 
 # set log file names
 scr_name=$(basename "$0" .sh)
-std_log=$workdir/$logdir/$name.$scr_name.std.log
-pbs_log=$workdir/$logdir/$name.$scr_name.pbs.log
-out_log=$workdir/$logdir/$name.$scr_name.out.log
+std_log=$logdir/$name.$scr_name.log
+scr_log=$logdir/$name.$scr_name.scr
 
 # write job script
 script=$(cat <<- EOS
 		#!/bin/bash
-		#PBS -l walltime=10:00:00
-		#PBS -l select=1:ncpus=12:mem=10gb
-		#PBS -j oe
-		#PBS -N salmon.$name
-		#PBS -q med-bio
-		#PBS -o ${std_log}
-		${depend:-}
+		#SBATCH --time=12:00:00
+		#SBATCH -N 1
+		#SBATCH -n 12
+		#SBATCH --mem=24gb
+		#SBATCH --job-name=$name.salmon
+		#SBATCH --output=$std_log
 
 		# load modules
-		module load anaconda3/personal
-		source activate salmon-0.12.0
+		source ~/miniconda3/etc/profile.d/conda.sh
+		conda activate salmon
 
-		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` > $out_log
-
-		# copy input & index to scratch
-		${r1_cp}
-		${r2_cp:-}
-		cp -rL ${workdir}/${index}* .
+		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 
 		# run Salmon
-		${salmon_cmd[@]} &>> $out_log
-
-		# copy results to output directory
-		cp -r salmon_out/* $workdir/$outdir/
+		${salmon_cmd[@]}
 		
-		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` >> $out_log
-		ls -lhAR &>> $out_log
-		ls -lhAR 
-		cp -r $out_log $workdir/$logdir/
+		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 	EOS
 )
-echo "$script" > $pbs_log
+echo "$script" > $scr_log
 
 # submit job, echo id and exit
-jobid=$(qsub "$pbs_log")
+jobid=$(sbatch "$scr_log")
 echo "JOBID: $jobid"
 exit 0

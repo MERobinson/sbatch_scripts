@@ -3,8 +3,7 @@ set -o pipefail
 set -o nounset
 
 # default arg
-workdir=$PWD
-outdir=''
+outdir=$PWD
 gencode='on'
 check='on'
 
@@ -64,8 +63,8 @@ if [[ -z ${transcripts:-} ]]; then
 fi
 
 # check input files exist
-if [[ ${check} = 'on' ]] && [[ ! -r ${workdir}/${transcripts} ]]; then
-	printf "\nERROR: Input FASTA file does not exist: %s/%s\n" $workdir $fasta 
+if [[ ${check} = 'on' ]] && [[ ! -r ${transcripts} ]]; then
+	printf "\nERROR: Input FASTA file does not exist: %s\n" $fasta 
 	echo "$help_message"; exit 1
 fi
 
@@ -74,8 +73,8 @@ if [[ ${gencode} = 'on' ]]; then
     gencode_arg='--gencode'
 fi
 
-# create required outdir
-mkdir -p $workdir/$outdir
+# create outdir
+mkdir -p $outdir
 
 # set name
 if [[ -z ${name:-} ]]; then
@@ -84,48 +83,40 @@ if [[ -z ${name:-} ]]; then
 fi
 
 # set command
-salmon_cmd=("salmon index -t $(basename ${transcripts})"
-            "-i output/$name --type quasi ${gencode_arg:-}")
+salmon_cmd=("salmon index -p 12 ${gencode_arg:-}"
+            "-t ${transcripts} -i ${outdir}/$name")
 
 # set logfiles
 scr_name=$(basename $0 .sh)
-std_log=$workdir/$outdir/$name.$scr_name.std.log
-pbs_log=$workdir/$outdir/$name.$scr_name.pbs.log
+std_log=$outdir/$name.$scr_name.std.log
+scr_log=$outdir/$name.$scr_name.scr.log
 
 # write job script
 script=$(cat <<- EOS 
 		#!/bin/bash
-		#PBS -l walltime=24:00:00
-		#PBS -l select=1:mem=6gb:ncpus=1
-		#PBS -j oe
-		#PBS -N $name
-		#PBS -q med-bio
-		#PBS -o ${std_log}
+		#SBATCH --time=24:00:00
+		#SBATCH -N 1
+		#SBATCH --mem=6gb
+		#SBATCH -n 12
+		#SBATCH --job-name=salmon_index
 	
 		# load modules
-		module load anaconda3/personal
-		source activate salmon-0.12.0
+		source ~/miniconda3/etc/profile.d/conda.sh
+		conda activate salmon
 	
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
-
-		# copy fasta to scratch
-		cp -L ${workdir}/${transcripts}* .
 
 		# run salmon
 		${salmon_cmd[@]} 
 		
-		# copy index files to outdir
-		cp -r output/${name}* $workdir/$outdir/
-
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
-		ls -lhAR
 
 		EOS
 )
-echo "$script" > $pbs_log
+echo "$script" > $scr_log
 
 # submit job
-jobid=$(qsub "$pbs_log")
+jobid=$(qsub "$scr_log")
 
 # echo job id and exit
 echo "JOBID: $jobid"

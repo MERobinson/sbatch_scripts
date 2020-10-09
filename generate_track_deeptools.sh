@@ -4,7 +4,7 @@ set -o nounset
 
 # default arg
 format='bedgraph'
-outdir=''
+outdir="."
 extend=100
 quality=10
 dedup=yes
@@ -60,11 +60,11 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         -o|--outdir)
-            outdir=$2
+            outdir="./$2"
             shift
             ;;
         -l|--logdir)
-            logdir=$2
+            logdir="./$2"
             shift
             ;;
         -t|--libtype)
@@ -112,7 +112,7 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         --depend)
-            depend="#PBS -W depend=$2"
+            depend="#SBATCH --dependency=afterok:$2"
             shift
             ;;
         *)
@@ -123,10 +123,13 @@ while [[ $# -gt 1 ]]; do
     shift
 done
 
-# set logdir
+# set dirs
 if [[ -z ${logdir:-} ]]; then
     logdir=$outdir
 fi
+mkdir -p $outdir
+mkdir -p $logdir
+tmpdir=$(mktemp -d)
 
 # check required arguments
 if [[ -z ${bam:-} ]]; then
@@ -137,22 +140,11 @@ elif [[ -z ${fasta:-} ]]; then
     echo "$help_message"; exit 1
 fi
 
-# set base
-bam_base=$(basename "$bam")
-bam_pref=${bam_base%%.*}
-
 # if no name provided extract from BAM
 if [[ -z "${name:-}" ]]; then
-    name=${bam_pref}
+    name=$(basename $bam)
+    name=${name%%.*}
 fi
-
-# set tmpdir
-tmpdir="tmp_${name}_trackgen"
-if [[ -e $tmpdir ]]; then
-    printf "\nERROR: tmpdir already exists: %s\n" $tmpdir
-    exit 1
-fi
-mkdir $tmpdir
 
 # set optional argument
 if [[ ${dedup} = yes ]]; then
@@ -173,11 +165,12 @@ fi
 # set format dependent arg
 if [[ $format = 'bedgraph' ]]; then
 	extension="bedGraph"
-    trackline="track type=$extension name=$name visibility=2 windowingFunction=mean autoScale=off"
-    trackline="${trackline} smoothingWindow=10 viewLimits=0:75 maxHeightPixels=0:75:150"
+    trackline=("\"track type=$extension name=$name visibility=2 windowingFunction=mean"
+               "autoScale=off smoothingWindow=2 viewLimits=0:75  maxHeightPixels=0:75:150\"")
     if [[ -n ${db:-} ]]; then trackline="${trackline} db=$db"; fi
-    format_arg="cat $name.$extension | grep -E \"^chr[0-9XYM]+\b\" > tmp.txt"
-    format_arg="${format_arg:-}; echo $trackline | cat - tmp.txt > $name.$extension"
+    format_arg=("cat ${outdir}/$name.$extension | grep -E \"^chr[0-9XYM]+\b\" >"
+                "${tmpdir}/tmp.txt; echo ${trackline[@]} |"
+                "cat - ${tmpdir}/tmp.txt > ${outdir}/$name.$extension")
 elif [[ $format = 'bigwig' ]]; then
     extension='bw'
 else
@@ -189,21 +182,16 @@ fi
 chr_list=$(cat $fasta | grep -Eo "^>chr[0-9MXY]+\b" | \
            grep -Eo "chr[0-9XY]+"| tr "\n" " ") 
 
-# create required dirs
-mkdir -p $outdir
-mkdir -p $logdir
-
 # set log file names
-scr_name=${scr_name%.*}
-std_log=$logdir/$name.$scr_name.std.log
-scr_log=$logdir/$name.$scr_name.scr.log
+std_log=${logdir}/${name}.$(basename "$0" .sh).log
+scr_log=${logdir}/${name}.$(basename "$0" .sh).scr
 
 # compile commands
 bamcov_cmd=("bamCoverage ${ext_arg:-} ${center_arg:-} ${smooth_arg:-}"
                 "--normalizeUsing RPKM --ignoreForNormalization chrX chrM"
                 "--numberOfProcessors 12 --outFileFormat ${format}"
                 "--bam ${tmpdir}/input.filt.bam --binSize ${binsize}"
-                "--outFileName ${tmpdir}/${name}.${extension}")
+                "--outFileName ${outdir}/${name}.${extension}")
 
 # run job
 script=$(cat <<- EOS 
@@ -213,37 +201,32 @@ script=$(cat <<- EOS
 		#SBATCH -n 12
 		#SBATCH --mem=18G
 		#SBATCH --job-name=trackgen
-		#SBATCH --output=$std_log
+		#SBATCH -o ${std_log}
+		${depend:-}
+		
+		mkdir -p $tmpdir
 
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 
 		# load modules
+		source ~/miniconda3/etc/profile.d/conda.sh
 		module load samtools
-		source activate deeptools
-
-		# copy resource files to scratch
-		mkdir -p $tmpdir
-		cp ${bam}* $tmpdir/ 
+		conda activate deeptools
 
 		# filter bam prior to making track
-		samtools view -b ${dedup_arg:-} -q $quality \
-			$tmpdir/$bam_base $chr_list > $tmpdir/input.filt.bam
-		samtools index $tmpdir/input.filt.bam
+		samtools view -b ${dedup_arg:-} -q $quality -o ${tmpdir}/input.filt.bam $bam $chr_list
+		samtools index ${tmpdir}/input.filt.bam
 
 		# generate coverage track
-		${bamcov_cmd[@]} 
-
-		${format_arg:-}	
-		mv $tmpdir/$name.$extension $outdir/
-		ls -lhAR $tmpdir
-		rm -r $tmpdir
+		${bamcov_cmd[@]}
+		${format_arg[@]:-}
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 	EOS
 )
 echo "$script" > $scr_log
 
 # submit job
-jobid=$(qsub "$scr_log")
+jobid=$(sbatch "$scr_log")
 
 # echo jobid and exit
 echo "JOBID: $jobid"

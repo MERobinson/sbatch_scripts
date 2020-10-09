@@ -4,8 +4,6 @@ set -o pipefail
 set -o nounset
 
 # default arg
-workdir=$PWD
-outdir=''
 check='on'
 chimeric='off'
 twopass='off'
@@ -59,11 +57,11 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         -o|--outdir)
-            outdir=$2
+            outdir="./$2"
             shift
             ;;
         -l|--logdir)
-            logdir=$2
+            logdir="./$2"
             shift
             ;;
         --chimeric)
@@ -98,10 +96,16 @@ while [[ $# -gt 1 ]]; do
     shift
 done
 
-# set logdir
-if [[ -z ${logdir:-} ]]; then
-    logdir=$outdir
+# set/check output directories
+if [[ -z ${outdir:-} ]]; then
+    outdir="."
 fi
+mkdir -p $outdir
+if [[ -z ${logdir:-} ]]; then
+    logdir=${outdir}
+fi
+mkdir -p $logdir
+tmpdir=$(mktemp -d)
 
 # check required arg
 if [[ -z ${fq1:-} ]]; then
@@ -132,22 +136,16 @@ IFS=',' read -r -a fq1_array <<< $fq1
 if [[ ${#fq1_array[@]} -gt 1 ]]; then
     echo "Merging input R1 fastq"
     check='off'
-    fq1_merge="cat ${fq1_array[@]##*/} > $name.R1_merge.$fq_ext"
-    fq1_cp=$(printf "cp $workdir/%s .;" ${fq1_array[@]})
-    fq1=$name.R1_merge.$fq_ext
-else
-    fq1_cp="cp $workdir/$fq1 ."
+    fq1_merge="cat ${fq1_array[@]##*/} > ${tmpdir}/${name}.R1_merge.${fq_ext}"
+    fq1="${tmpdir}/${name}.R1_merge.${fq_ext}"
 fi
 if [[ -n ${fq2:-} ]]; then
     echo "Mate input - running in PE mode"
     IFS=',' read -r -a fq2_array <<< $fq2
     if [[ ${#fq2_array[@]} -gt 1 ]]; then
         echo "Merging input R2 fastq"
-        fq2_merge="cat ${fq2_array[@]##*/} > $name.R2_merge.$fq_ext"
-        fq2_cp=$(printf "cp $workdir/%s .;" ${fq2_array[@]})
-        fq2=$name.R2_merge.$fq_ext
-    else
-        fq2_cp="cp $workdir/$fq2 ."
+        fq2_merge="cat ${fq2_array[@]##*/} > ${tmpdir}/${name}.R2_merge.${fq_ext}"
+        fq2="${tmpdir}/${name}.R2_merge.${fq_ext}"
     fi
 else
     echo "No mate input - running in SE mode"
@@ -155,14 +153,14 @@ fi
 
 # check files unless flagged
 if [[ $check = 'on' ]]; then
-    if [[ ! -r $workdir/$fq1 ]]; then
-        printf "\nERROR: FASTQ file is not readable: %s/%s\n" $workdir $fq1
+    if [[ ! -r $fq1 ]]; then
+        printf "\nERROR: FASTQ file is not readable: %s\n" $fq1
         echo "$help_message"; exit 1
-    elif [[ ! -z ${fq2:-} ]] & [[ ! -r $workdir/${fq2:-} ]]; then
-        printf "\nERROR: FASTQ file is not readable: %s/%s\n" $workdir $fq2
+    elif [[ -n ${fq2:-} ]] && [[ ! -r ${fq2:-} ]]; then
+        printf "\nERROR: FASTQ file is not readable: %s\n" ${fq2:-}
         echo "$help_message"; exit 1
-    elif [[ ! -r $workdir/$index ]]; then
-        printf "\nERROR: Index folder is not readable: %s/%s\n" $workdir $index
+    elif [[ ! -r $index ]]; then
+        printf "\nERROR: Index folder is not readable: %s\n" $index
         echo "$help_message"; exit 1
     fi
 fi
@@ -177,26 +175,16 @@ fi
 if [[ -n ${sjdb:-} ]]; then
     IFS=',' read -r -a sjdb_array <<< "$sjdb"
     sjdb_arg="--sjdbFileChrStartEnd ${sjdb_array[@]##*/}"
-    sjdb_cp=$(printf "cp $workdir/%s .;" ${sjdb_array[@]})
 fi
 if [[ -n ${clip3:-} ]]; then
     clip3_arg="--clip3pNbases ${clip3}"
 fi
 
-# get basenames/prefix
-fq1_base=$(basename "$fq1")
-if [[ -n ${fq2:-} ]]; then fq2_base=$(basename "$fq2"); fi
-index_base=$(basename "$index")
-
-# setup output dir
-mkdir -p $workdir/$outdir
-mkdir -p $workdir/$logdir
-
 # set commands
 star_command=("STAR --runMode alignReads"
                 "--runThreadN 20"
-                "--genomeDir ${index_base}"
-                "--readFilesIn ${fq1_base} ${fq2_base:-}"
+                "--genomeDir ${index}"
+                "--readFilesIn ${fq1} ${fq2:-}"
                 "--outFilterType BySJout"
                 "--outFilterMultimapNmax 20"
                 "--alignSJoverhangMin 8"
@@ -205,10 +193,10 @@ star_command=("STAR --runMode alignReads"
                 "--alignIntronMin 20"
                 "--alignIntronMax 1000000"
                 "--alignMatesGapMax 1000000"
-                "--outSAMstrandField intonMotif"
+                "--outSAMstrandField intronMotif"
                 "--quantMode TranscriptomeSAM GeneCounts"
                 "--readNameSeparator _"
-                "--outFileNamePrefix ${name}.star."
+                "--outFileNamePrefix ${outdir}/${name}.star."
                 "--outBAMsortingThreadN 20"
                 "--outSAMtype BAM SortedByCoordinate"
                 "${compress_arg:-}"
@@ -219,31 +207,25 @@ star_command=("STAR --runMode alignReads"
 
 # set log file names
 scr_name=$(basename "$0" .sh)
-std_log=$workdir/$logdir/$name.$scr_name.std.log
-sbatch_log=$workdir/$logdir/$name.$scr_name.pbs.log
+std_log=${logdir}/${name}.${scr_name}.log
+scr_log=${logdir}/${name}.${scr_name}.scr
 
 # run PBS script
 script=$(cat <<- EOS 
 		#!/bin/bash
 		#SBATCH --time=24:00:00
-		#SBATCH -n 1
-		#SBATCH -N 1-20
-		#SBATCH --mem=40G
+		#SBATCH -n 20
+		#SBATCH -N 1
+		#SBATCH --mem=60G
 		#SBATCH --job-name=$name.star
 		#SBATCH --output=$std_log
 
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 
 		# load modules
-		module load SAMtools
-		module load STAR/2.6.0.a
+		source ~/miniconda3/etc/profile.d/conda.sh
+        conda activate star
 		
-		# copy files to scratch
-		cp -rL $workdir/$index .
-		${fq1_cp:-} 
-		${fq2_cp:-} 
-		${sjdb_cp:-} 
-
 		# merge fastq if multiple
 		${fq1_merge:-} 
 		${fq2_merge:-}
@@ -252,22 +234,17 @@ script=$(cat <<- EOS
 		${star_command[@]} 
 		
 		# index bam
-		mv ${name}.star.Aligned.sortedByCoord.out.bam $name.star.bam 
-		samtools index ${name}.star.bam
+		mv ${outdir}/${name}.star.Aligned.sortedByCoord.out.bam \
+			${outdir}/${name}.star.bam 
+		samtools index ${outdir}/${name}.star.bam
 		
-		# copy output to outdir
-		cp ${name}.star.* $workdir/$outdir 
-
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\` 
-		ls -lhAR 
-		ls -lhAR 
-		cp $out_log $workdir/$logdir/
 		EOS
 ) 
-echo "$script" > $sbatch_log
+echo "$script" > $scr_log
 
 # submit job
-jobid=$(sbatch "$sbatch_log")
+jobid=$(sbatch "$scr_log")
 
 # echo job id and exit
 echo "JOBID: $jobid"

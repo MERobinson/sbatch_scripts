@@ -4,7 +4,6 @@ set -o nounset
 
 # default arg
 format='bigwig'
-outdir=${PWD}
 extend=200
 quality=10
 dedup='yes'
@@ -16,7 +15,7 @@ help_message="
 Wrapper to run deeptools bamCompare to generate tracks of difference in signal between two bam.
 
 usage:
-    bash $(basename "$0") [-options] -b <BAM>
+    bash $(basename "$0") [-options] -t <TEST_BAM> -c <CONTROL_BAM>
 required arguments:
     -t|--test : BAM file for test sample
     -c|--cntrl : BAM file for control sample
@@ -57,11 +56,11 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         -o|--outdir)
-            outdir=$2
+            outdir="./$2"
             shift
             ;;
         -l|--logdir)
-            logdir=$2
+            logdir="./$2"
             shift
             ;;
         -f|--format)
@@ -101,19 +100,27 @@ while [[ $# -gt 1 ]]; do
             shift
             ;;
         *)
-            echo "\nError: Illegal argument: %s %s" $1 $2
+            printf "\nError: Illegal argument: %s %s" $1 $2
             echo "$help_message"; exit 1
         ;;
     esac
     shift
 done
 
-# set dir
-if [[ -z ${logdir:-} ]]; then
-    logdir=$outdir
+# set/check output directories
+if [[ -z ${outdir:-} ]]; then
+    outdir="./"
 fi
-mkdir -p ${outdir}
-mkdir -p ${logdir}
+mkdir -p $outdir
+if [[ -z ${logdir:-} ]]; then
+    logdir=${outdir}
+fi
+mkdir -p $logdir
+if [[ -z "${qcdir:-}" ]]; then
+    qcdir=${outdir}
+fi
+mkdir -p $qcdir
+tmpdir=$(mktemp -d)
 
 # check required arguments
 if [[ -z ${test_bam:-} ]]; then
@@ -135,14 +142,6 @@ control_base=$(basename "$control_bam")
 if [[ -z ${name:-} ]]; then
     name=${test_base%%.*}
 fi
-
-# set tmpdir
-tmpdir="tmp_${name}_bamcompare"
-if [[ -e ${tmpdir} ]]; then
-    printf "\nERROR: tmpdir already exists: %s\n" $tmpdir
-    exit 1
-fi
-mkdir $tmpdir
 
 # set dedup argument
 if [[ $dedup = yes ]]; then
@@ -168,8 +167,8 @@ chr_list=$(cat $fasta | grep -Eo "^>chr[0-9MXY]+\b" | \
 
 # set log names
 scr_name=$(basename $0 .sh)
-scr_log=$logdir/$name.$scr_name.scr.log
-std_log=$logdir/$name.$scr_name.std.log
+scr_log=${logdir}/${name}.${scr_name}.scr
+std_log=${logdir}/${name}.${scr_name}.log
 
 # run job
 script=$(cat <<- EOS 
@@ -182,20 +181,18 @@ script=$(cat <<- EOS
 		#SBATCH --output=$std_log
 	
 		# load modules
-		module load samtools
-		source activate deeptools    
+		source ~/miniconda3/etc/profile.d/conda.sh
+		conda activate deeptools
 
 		printf "\nSTART: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
 
-		# copy resource files to scratch
-		cp ${test_bam}* ${tmpdir}/
-		cp ${control_bam}* ${tmpdir}/
+		if [[ ! -d ${tmpdir} ]]; then mkdir ${tmpdir}; fi
 
 		# filter bam prior to making track
 		samtools view -b ${dedup_arg:-} -q ${quality} \
-			${tmpdir}/${test_base} ${chr_list} > ${tmpdir}/${name}.test.bam
+			${test_bam} ${chr_list} > ${tmpdir}/${name}.test.bam
 		samtools view -b ${dedup_arg:-} -q ${quality} \
-			${tmpdir}/${control_base} ${chr_list} > ${tmpdir}/${name}.control.bam
+			${control_bam} ${chr_list} > ${tmpdir}/${name}.control.bam
 		samtools index ${tmpdir}/${name}.test.bam
 		samtools index ${tmpdir}/${name}.control.bam
 
@@ -210,20 +207,18 @@ script=$(cat <<- EOS
 			--ignoreForNormalization chrX \
 			--numberOfProcessors 20 \
 			--outFileFormat ${format} \
-			--outFileName ${name}.${extension} ${smooth_arg}
+			--outFileName ${name}.${extension} ${smooth_arg:-}
 
 		# move output to outdir
 		mv ${name}.${extension} $outdir/
 
 		printf "\nEND: %s %s\n" \`date '+%Y-%m-%d %H:%M:%S'\`
-		ls -lhAR ${tmpdir}
-		rm -r ${tmpdir}
 	EOS
 )
 echo "$script" > $scr_log
 
 # submit job
-jobid=$(qsub "$scr_log")
+jobid=$(sbatch "$scr_log")
 
 # echo job id and exit
 echo "JOBID: $jobid"
